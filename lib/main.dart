@@ -73,6 +73,7 @@ class _YTMvpState extends State<YTMvp> {
   static const _ytScopes = [_ytScope];
   GoogleSignInAccount? _currentUser;
   List<VideoNode> _likedNodes = [];
+  List<VideoNode> _rankedNeighbors = [];
   StreamSubscription<GoogleSignInAuthenticationEvent>? _authSub;
 
   @override
@@ -121,10 +122,21 @@ class _YTMvpState extends State<YTMvp> {
       for (final n in likedNodes) {
         graph.addLiked(n);
       }
+      for (final liked in likedNodes) {
+        final related = await _fetchRelatedForVideo(yt, liked.id, max: 8);
+        for (final neighbor in related) {
+          graph.addEdge(liked.id, neighbor);
+        }
+      }
+
+      final ranked = graph.rankedNeighbors();
       debugPrint(
-        'Graph: ${graph.liked.length} liked nodes (titles: ${likedNodes.map((e) => e.title).take(3).join(", ")}...)',
+        'Graph: ${graph.liked.length} liked, ${graph.neighbors.length} neighbors, top: ${ranked.take(3).map((v) => "${v.title} (${v.score})").join(",")}',
       );
-      setState(() => _likedNodes = likedNodes);
+      setState(() {
+        _likedNodes = likedNodes;
+        _rankedNeighbors = ranked;
+      });
     } on GoogleSignInException catch (e) {
       debugPrint("Sign-in: ${e.description}");
     } catch (e, st) {
@@ -135,6 +147,11 @@ class _YTMvpState extends State<YTMvp> {
   Future<void> _handleSignOut() async {
     try {
       await _googleSignIn.signOut();
+      if (!mounted) return;
+      setState(() {
+        _likedNodes = [];
+        _rankedNeighbors = [];
+      });
     } catch (e, st) {
       debugPrint('Sign out error: $e\n$st');
     }
@@ -192,6 +209,60 @@ class _YTMvpState extends State<YTMvp> {
     return out;
   }
 
+  Future<List<VideoNode>> _fetchRelatedForVideo(
+    YouTubeApi api,
+    String videoId, {
+    int max = 10,
+  }) async {
+    final res = await api.search.list(
+      ['snippet'],
+      q: videoId,
+      type: ['video'],
+      maxResults: max,
+    );
+
+    final out = <VideoNode>[];
+    for (final item in res.items ?? const <SearchResult>[]) {
+      final id = item.id?.videoId;
+      if (id == null) continue;
+
+      final sn = item.snippet;
+      out.add(
+        VideoNode(
+          id: id,
+          title: sn?.title ?? id,
+          thumbnailUrl:
+              sn?.thumbnails?.medium?.url ?? sn?.thumbnails?.default_?.url,
+        ),
+      );
+    }
+    return out;
+  }
+
+  Widget _buildVideoList(
+    List<VideoNode> nodes,
+    String emptyMessage, {
+    bool showScore = false,
+  }) {
+    if (nodes.isEmpty) {
+      return Center(child: Text(emptyMessage));
+    }
+    return ListView.builder(
+      itemCount: nodes.length,
+      itemBuilder: (context, i) {
+        final v = nodes[i];
+        final thumb = v.thumbnailUrl;
+        return ListTile(
+          leading: thumb != null
+              ? Image.network(thumb, width: 80, fit: BoxFit.cover)
+              : const SizedBox(width: 80, child: Icon(Icons.movie)),
+          title: Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+          subtitle: Text(showScore ? '${v.id} · score ${v.score}' : v.id),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -202,55 +273,49 @@ class _YTMvpState extends State<YTMvp> {
                 onPressed: _handleSignIn,
                 child: Text("Login with Google"),
               )
-            : Column(
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(
-                          'Liked Videos (${_likedNodes.length})',
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                        OutlinedButton(
-                          onPressed: _handleSignOut,
-                          child: const Text('Sign out'),
-                        ),
+            : DefaultTabController(
+                length: 2,
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Signed in',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          OutlinedButton(
+                            onPressed: _handleSignOut,
+                            child: const Text('Sign out'),
+                          ),
+                        ],
+                      ),
+                    ),
+                    TabBar(
+                      tabs: [
+                        Tab(text: 'Liked (${_likedNodes.length})'),
+                        Tab(text: 'Recommended (${_rankedNeighbors.length})'),
                       ],
                     ),
-                  ),
-                  Expanded(
-                    child: _likedNodes.isEmpty
-                        ? const Center(
-                            child: Text('No liked videos loaded yet.'),
-                          )
-                        : ListView.builder(
-                            itemCount: _likedNodes.length,
-                            itemBuilder: (context, i) {
-                              final v = _likedNodes[i];
-                              return ListTile(
-                                leading: v.thumbnailUrl != null
-                                    ? Image.network(
-                                        v.thumbnailUrl!,
-                                        width: 80,
-                                        fit: BoxFit.cover,
-                                      )
-                                    : const SizedBox(
-                                        width: 80,
-                                        child: Icon(Icons.movie),
-                                      ),
-                                title: Text(
-                                  v.title,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                                subtitle: Text(v.id),
-                              );
-                            },
+                    Expanded(
+                      child: TabBarView(
+                        children: [
+                          _buildVideoList(
+                            _likedNodes,
+                            'No liked videos loaded yet.',
                           ),
-                  ),
-                ],
+                          _buildVideoList(
+                            _rankedNeighbors,
+                            'No recommendations yet. Sign in again to refresh.',
+                            showScore: true,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
               ),
       ),
     );
