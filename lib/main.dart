@@ -11,12 +11,16 @@ class VideoNode {
     required this.id,
     required this.title,
     this.thumbnailUrl,
+    this.categoryId,
+    this.tags,
     this.score = 0,
   });
 
   final String id;
   final String title;
   final String? thumbnailUrl;
+  final String? categoryId;
+  final List<String>? tags;
 
   /// For neighbors: how many distinct liked videos linked here.
   int score;
@@ -33,7 +37,11 @@ class CoWatchGraph {
   }
 
   /// One edge per (likedVideoId -> neighborId). Bumps neighbor [score] when a new liked source links to that neighbor.
-  void addEdge(String likedVideoId, VideoNode neighbor) {
+  void addEdge(
+    String likedVideoId,
+    VideoNode neighbor, {
+    int scoreIncrement = 1,
+  }) {
     _edgesFromLiked.putIfAbsent(likedVideoId, () => <String>{});
     final seen = _edgesFromLiked[likedVideoId]!;
     if (seen.contains(neighbor.id)) return;
@@ -41,10 +49,10 @@ class CoWatchGraph {
 
     final existing = neighbors[neighbor.id];
     if (existing == null) {
-      neighbor.score = 1;
+      neighbor.score = scoreIncrement;
       neighbors[neighbor.id] = neighbor;
     } else {
-      existing.score++;
+      existing.score += scoreIncrement;
     }
   }
 
@@ -71,6 +79,24 @@ class _YTMvpState extends State<YTMvp> {
   final GoogleSignIn _googleSignIn = GoogleSignIn.instance;
   static const _ytScope = YouTubeApi.youtubeReadonlyScope;
   static const _ytScopes = [_ytScope];
+  static const int _maxSearchCallsPerSession = 3;
+  static const Map<String, String> _ytCategoryNames = {
+    '1': 'Film & Animation',
+    '2': 'Autos & Vehicles',
+    '10': 'Music',
+    '15': 'Pets & Animals',
+    '17': 'Sports',
+    '19': 'Travel & Events',
+    '20': 'Gaming',
+    '22': 'People & Blogs',
+    '23': 'Comedy',
+    '24': 'Entertainment',
+    '25': 'News & Politics',
+    '26': 'Howto & Style',
+    '27': 'Education',
+    '28': 'Science & Technology',
+    '29': 'Nonprofits & Activism',
+  };
   GoogleSignInAccount? _currentUser;
   List<VideoNode> _likedNodes = [];
   List<VideoNode> _rankedNeighbors = [];
@@ -117,15 +143,32 @@ class _YTMvpState extends State<YTMvp> {
       if (!mounted) return;
       setState(() => _currentUser = account);
       debugPrint('YouTube OK, channel: $title');
+
       final likedNodes = await _fetchLikedVideoNodes(yt);
       final graph = CoWatchGraph();
       for (final n in likedNodes) {
         graph.addLiked(n);
       }
-      for (final liked in likedNodes) {
-        final related = await _fetchRelatedForVideo(yt, liked.id, max: 8);
+      final seedVideos = _pickDistinctCategorySeeds(
+        likedNodes,
+        maxSeeds: _maxSearchCallsPerSession,
+      );
+      debugPrint(
+        'Seeds: ${seedVideos.map((v) {
+          final catName = _ytCategoryNames[v.categoryId] ?? v.categoryId ?? "unknown";
+          return '"${v.title}" cat:$catName';
+        }).join(" | ")}',
+      );
+
+      for (final liked in seedVideos) {
+        final related = await _fetchRelatedForVideo(yt, liked, max: 50);
         for (final neighbor in related) {
-          graph.addEdge(liked.id, neighbor);
+          final overlap = _tagWordOverlap(liked, neighbor);
+          graph.addEdge(
+            liked.id,
+            neighbor,
+            scoreIncrement: overlap > 0 ? overlap : 1,
+          );
         }
       }
 
@@ -206,27 +249,146 @@ class _YTMvpState extends State<YTMvp> {
       pageToken = page.nextPageToken;
       if (pageToken == null) break;
     }
-    return out;
+    return _attachCategories(api, out);
+  }
+
+  List<VideoNode> _pickDistinctCategorySeeds(
+    List<VideoNode> likedNodes, {
+    int maxSeeds = 3,
+  }) {
+    final picked = <VideoNode>[];
+    final seenCategories = <String>{};
+
+    for (final node in likedNodes) {
+      final cat = node.categoryId;
+      if (cat == null || cat.isEmpty) continue;
+      if (seenCategories.add(cat)) {
+        picked.add(node);
+        if (picked.length >= maxSeeds) return picked;
+      }
+    }
+
+    for (final node in likedNodes) {
+      if (picked.any((p) => p.id == node.id)) continue;
+      picked.add(node);
+      if (picked.length >= maxSeeds) break;
+    }
+
+    return picked;
+  }
+
+  Future<List<VideoNode>> _attachCategories(
+    YouTubeApi api,
+    List<VideoNode> nodes,
+  ) async {
+    if (nodes.isEmpty) return nodes;
+
+    final ids = nodes.map((n) => n.id).toList();
+    final categoryById = <String, String?>{};
+    final tagsById = <String, List<String>?>{};
+
+    for (var i = 0; i < ids.length; i += 50) {
+      final chunk = ids.sublist(i, (i + 50 > ids.length) ? ids.length : i + 50);
+      final res = await api.videos.list(['snippet'], id: chunk);
+      for (final v in res.items ?? const <Video>[]) {
+        final vid = v.id;
+        if (vid == null) continue;
+        categoryById[vid] = v.snippet?.categoryId;
+        tagsById[vid] = v.snippet?.tags;
+      }
+    }
+    return nodes
+        .map(
+          (n) => VideoNode(
+            id: n.id,
+            title: n.title,
+            thumbnailUrl: n.thumbnailUrl,
+            categoryId: categoryById[n.id],
+            tags: tagsById[n.id],
+            score: n.score,
+          ),
+        )
+        .toList();
+  }
+
+  String _searchQueryFromSeed(VideoNode seed) {
+    final buf = StringBuffer();
+    void appendWord(String w) {
+      final t = w.trim();
+      if (t.isEmpty) return;
+      if (buf.isNotEmpty) buf.write(' ');
+      buf.write(t);
+    }
+
+    for (final word in seed.title.split(RegExp(r'\s+'))) {
+      appendWord(word);
+      //appends each split word from the title to the buffer
+    }
+    final tagList = seed.tags;
+    if (tagList != null) {
+      for (final tag in tagList.take(5)) {
+        appendWord(tag);
+        //append each tag from the user upload to the buffer
+      }
+    }
+
+    var q = buf.toString();
+    if (q.length > 200) q = q.substring(0, 200).trim();
+    if (q.isEmpty) {
+      q = seed.title.trim().isNotEmpty ? seed.title.trim() : seed.id;
+    }
+    return q;
+  }
+
+  int _tagWordOverlap(VideoNode seed, VideoNode neighbor) {
+    final seedTags = seed.tags;
+    final neighborTags = neighbor.tags;
+    if (seedTags == null || neighborTags == null) return 0;
+
+    // build a set of lowecase words from all seed tags
+    final seedWords = <String>{};
+    for (final tag in seedTags) {
+      for (final word in tag.toLowerCase().split(RegExp(r'[\s\-,]+'))) {
+        if (word.length > 2)
+          seedWords.add(word); // skip tiny 1 and 2 letter words
+      }
+    }
+
+    // count how many words in neighbor tags appear in seedWords
+    var count = 0;
+    for (final tag in neighborTags) {
+      for (final word in tag.toLowerCase().split(RegExp(r'[\s\-,]+'))) {
+        if (word.length > 2 && seedWords.contains(word)) count++;
+      }
+    }
+    return count;
   }
 
   Future<List<VideoNode>> _fetchRelatedForVideo(
     YouTubeApi api,
-    String videoId, {
+    VideoNode seed, {
     int max = 10,
   }) async {
+    final q = _searchQueryFromSeed(seed);
+    debugPrint('search q for "${seed.title}": $q');
+
     final res = await api.search.list(
       ['snippet'],
-      q: videoId,
+      q: q,
       type: ['video'],
       maxResults: max,
+      relevanceLanguage: 'en',
+      regionCode: 'US',
     );
 
     final out = <VideoNode>[];
     for (final item in res.items ?? const <SearchResult>[]) {
       final id = item.id?.videoId;
-      if (id == null) continue;
+      if (id == null || id == seed.id) continue;
 
       final sn = item.snippet;
+      final title = sn?.title ?? id;
+      if (RegExp(r'[\u0400-\u04FF]').hasMatch(title)) continue;
       out.add(
         VideoNode(
           id: id,
@@ -235,6 +397,30 @@ class _YTMvpState extends State<YTMvp> {
               sn?.thumbnails?.medium?.url ?? sn?.thumbnails?.default_?.url,
         ),
       );
+    }
+    if (out.isNotEmpty) {
+      final ids = out.map((n) => n.id).toList();
+      final tagsById = <String, List<String>?>{};
+      for (int i = 0; i < ids.length; i += 50) {
+        final chunk = ids.sublist(
+          i,
+          (i + 50 > ids.length) ? ids.length : i + 50,
+        );
+        final vRes = await api.videos.list(['snippet'], id: chunk);
+        for (final v in vRes.items ?? const <Video>[]) {
+          if (v.id != null) tagsById[v.id!] = v.snippet?.tags;
+        }
+      }
+      return out
+          .map(
+            (n) => VideoNode(
+              id: n.id,
+              title: n.title,
+              thumbnailUrl: n.thumbnailUrl,
+              tags: tagsById[n.id],
+            ),
+          )
+          .toList();
     }
     return out;
   }

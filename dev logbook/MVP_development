@@ -1,0 +1,52 @@
+------------------------------------
+MVP development session
+------------------------------------
+(1) refine the related videos to pull a search on the (3) categories most recent in the users liked video playlist
+
+Discoveries:
+(1) _fetchRelatedVideos is YouTubeApi expensive
+    -uses search.list() call, which is 100 units, per call [10,000 units daily limit only]
+    -Lets refine how we use it!
+
+(2) Our _fetchRelatedVideos call as it stands 
+    returns 3 videos (should be maybe top 5 for each category call)
+    should return category of video retrieved (should also color the UI to indicate the category of retrieved video)
+    search conditions?
+
+------------------------------------
+Refining the use of .search() API call as our Edge drawer!
+------------------------------------
+
+(1) -relevant video, string matching (tweak as needed)
+(2) -look at all the impact we can have on the .search() method, tie down our unique case
+    -ex: order
+    Solution:
+    Adding title/tag-based search
+    (1) adding tags on the videoNode at the same time as we add the categories (_addCategories)
+        -tags list is already available via the API, the tags are created by the uploader when they upload the video!!
+        -will only use the first 5 tags, as they are the most signal rich (filled w/ relevant to search text)
+    (2) build the search query parameter, q, from the title + tags, Excluding the seed from the results
+
+returns 3 videos (should be maybe top 5 for each category call)
+(1) -so _fetchRelatedVideos returs a searchResult, which is a list of videoIds and video data retrieved from the search
+    -then that searchResult is stored in related
+    -for every node in related, .addEdge() is called on our graph and an edge is created from a liked video
+    -rankedNeighbors is run w/ .compareTo and the resulting videoNodes from neighbors in ranked scores
+    Issues:
+        -passing in a max (8) limits the YouTube provide cap from 50 down to 8
+        -using the parameter 'q: videoId' is not a search for relatedVideos, but a string matching for the alphanumeric videoId
+
+
+we will run this on the (3) categories chosen so...
+
+------------------------------------
+Refining the categorization
+------------------------------------
+(1) -how many total categories? do we want to display?
+(2) -look at all the ways we cn impact the categories used.
+
+w/ Categorization performed on Liked Playlist, and then Search performed on top (3) categories, we should have our edges mapped and ready to UI for MVP.
+
+TODO
+    -add category to the UI Display of the recommended videos
+    -refinement of categorization
