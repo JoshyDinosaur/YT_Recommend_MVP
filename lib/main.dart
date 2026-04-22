@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:extension_google_sign_in_as_googleapis_auth/extension_google_sign_in_as_googleapis_auth.dart';
 import 'package:googleapis/youtube/v3.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'dart:async';
 
 void main() => runApp(const MaterialApp(home: YTMvp()));
@@ -98,6 +99,7 @@ class _YTMvpState extends State<YTMvp> {
     '29': 'Nonprofits & Activism',
   };
   GoogleSignInAccount? _currentUser;
+  bool _showResults = false;
   List<VideoNode> _likedNodes = [];
   List<VideoNode> _rankedNeighbors = [];
   StreamSubscription<GoogleSignInAuthenticationEvent>? _authSub;
@@ -112,6 +114,42 @@ class _YTMvpState extends State<YTMvp> {
   void dispose() {
     unawaited(_authSub?.cancel());
     super.dispose();
+  }
+
+  Color _cardColorForCategory(String? categoryId) {
+    const redTint = Color(0xFF2A1E1E);
+    const blueTint = Color(0xFF1E1E2A);
+    const greenTint = Color(0xFF1E2A1E);
+    const neutral = Color(0xFF252525);
+
+    switch (categoryId) {
+      // Red - entertainment/arts
+      case '1': // Film & Animation
+      case '10': // Music
+      case '22': // People & Blogs
+      case '23': // Comedy
+      case '24': // Entertainment
+        return redTint;
+
+      // Blue - knowledge
+      case '25': // News & Politics
+      case '27': // Education
+      case '28': // Science & Technology
+      case '29': // Nonprofits & Activism
+        return blueTint;
+
+      // Green - activity/lifestyle
+      case '2': // Auto & Vechicles
+      case '15': // Pets & Animals
+      case '17': // Sports
+      case '19': // Travel & Events
+      case '20': // Gaming
+      case '26': // Howto & Style
+        return greenTint;
+
+      default:
+        return neutral;
+    }
   }
 
   Future<void> _bootstrap() async {
@@ -197,6 +235,62 @@ class _YTMvpState extends State<YTMvp> {
       });
     } catch (e, st) {
       debugPrint('Sign out error: $e\n$st');
+    }
+  }
+
+  Future<void> _handleGenerateEdges() async {
+    try {
+      GoogleSignInAccount? account = _currentUser;
+
+      // if not signed in yet, trigger OAuth now
+      if (account == null) {
+        account = await _googleSignIn.authenticate(scopeHint: _ytScopes);
+        if (!mounted) return;
+        setState(() => _currentUser = account);
+      }
+
+      final yt = await _youTubeApiFor(account!);
+
+      final likedNodes = await _fetchLikedVideoNodes(yt);
+      final graph = CoWatchGraph();
+      for (final n in likedNodes) {
+        graph.addLiked(n);
+      }
+
+      final seedVideos = _pickDistinctCategorySeeds(
+        likedNodes,
+        maxSeeds: _maxSearchCallsPerSession,
+      );
+      debugPrint(
+        'Seeds: ${seedVideos.map((v) {
+          final catName = _ytCategoryNames[v.categoryId] ?? v.categoryId ?? "unknown";
+          return '"${v.title}" cat:$catName';
+        }).join(" | ")}',
+      );
+
+      for (final liked in seedVideos) {
+        final related = await _fetchRelatedForVideo(yt, liked, max: 50);
+        for (final neighbor in related) {
+          final overlap = _tagWordOverlap(liked, neighbor);
+          graph.addEdge(
+            liked.id,
+            neighbor,
+            scoreIncrement: overlap > 0 ? overlap : 1,
+          );
+        }
+      }
+
+      final ranked = graph.rankedNeighbors();
+      if (!mounted) return;
+      setState(() {
+        _likedNodes = likedNodes;
+        _rankedNeighbors = ranked;
+        _showResults = true;
+      });
+    } on GoogleSignInException catch (e) {
+      debugPrint("Sign-in: ${e.description}");
+    } catch (e, st) {
+      debugPrint('Generate edges error: $e\n$st');
     }
   }
 
@@ -401,6 +495,7 @@ class _YTMvpState extends State<YTMvp> {
     if (out.isNotEmpty) {
       final ids = out.map((n) => n.id).toList();
       final tagsById = <String, List<String>?>{};
+      final categoryById = <String, String?>{};
       for (int i = 0; i < ids.length; i += 50) {
         final chunk = ids.sublist(
           i,
@@ -408,7 +503,10 @@ class _YTMvpState extends State<YTMvp> {
         );
         final vRes = await api.videos.list(['snippet'], id: chunk);
         for (final v in vRes.items ?? const <Video>[]) {
-          if (v.id != null) tagsById[v.id!] = v.snippet?.tags;
+          if (v.id != null) {
+            tagsById[v.id!] = v.snippet?.tags;
+            categoryById[v.id!] = v.snippet?.categoryId;
+          }
         }
       }
       return out
@@ -418,6 +516,7 @@ class _YTMvpState extends State<YTMvp> {
               title: n.title,
               thumbnailUrl: n.thumbnailUrl,
               tags: tagsById[n.id],
+              categoryId: categoryById[n.id],
             ),
           )
           .toList();
@@ -431,79 +530,208 @@ class _YTMvpState extends State<YTMvp> {
     bool showScore = false,
   }) {
     if (nodes.isEmpty) {
-      return Center(child: Text(emptyMessage));
+      return Center(
+        child: Text(
+          emptyMessage,
+          style: const TextStyle(color: Colors.white54),
+        ),
+      );
     }
     return ListView.builder(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       itemCount: nodes.length,
       itemBuilder: (context, i) {
         final v = nodes[i];
         final thumb = v.thumbnailUrl;
-        return ListTile(
-          leading: thumb != null
-              ? Image.network(thumb, width: 80, fit: BoxFit.cover)
-              : const SizedBox(width: 80, child: Icon(Icons.movie)),
-          title: Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis),
-          subtitle: Text(showScore ? '${v.id} · score ${v.score}' : v.id),
+        final cardColor = _cardColorForCategory(v.categoryId);
+        return Container(
+          margin: const EdgeInsets.only(bottom: 10),
+          decoration: BoxDecoration(
+            color: cardColor,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: Colors.white10, width: 0.5),
+          ),
+          child: Row(
+            children: [
+              ClipRRect(
+                borderRadius: const BorderRadius.horizontal(
+                  left: Radius.circular(12),
+                ),
+                child: thumb != null
+                    ? Image.network(
+                        thumb,
+                        width: 120,
+                        height: 72,
+                        fit: BoxFit.cover,
+                      )
+                    : const SizedBox(
+                        width: 120,
+                        height: 72,
+                        child: Icon(Icons.movie, color: Colors.white24),
+                      ),
+              ),
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        v.title,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      if (showScore) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          'score ${v.score}',
+                          style: const TextStyle(
+                            color: Colors.white38,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
         );
       },
+    );
+  }
+
+  Widget _buildLandingPage() {
+    return Scaffold(
+      backgroundColor: const Color(0xFF1C1C1E),
+      body: SafeArea(
+        child: Column(
+          children: [
+            const Spacer(flex: 2),
+            Center(
+              child: Image.asset(
+                'assets/images/LikePartite_1.png',
+                height: 180,
+                filterQuality: FilterQuality.high,
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              'LikePartite',
+              style: GoogleFonts.montserrat(
+                color: Colors.white,
+                fontSize: 32,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 1.5,
+              ),
+            ),
+            const Spacer(flex: 1),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 48),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF2A1E1E),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                      side: const BorderSide(color: Colors.white24),
+                    ),
+                  ),
+                  onPressed: _handleGenerateEdges,
+                  child: Text(
+                    'Generate Edges',
+                    style: GoogleFonts.montserrat(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 52),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildResultsView(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        children: [
+          TabBar(
+            indicatorColor: Colors.white70,
+            labelColor: Colors.white,
+            unselectedLabelColor: Colors.white38,
+            tabs: [
+              Tab(text: 'Liked (${_likedNodes.length})'),
+              Tab(text: 'Recommended (${_rankedNeighbors.length})'),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                _buildVideoList(_likedNodes, 'No liked videos loaded yet.'),
+                _buildVideoList(
+                  _rankedNeighbors,
+                  'No recommendations yet.',
+                  showScore: true,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("YT Recommend MVP")),
-      body: Center(
-        child: _currentUser == null
-            ? ElevatedButton(
-                onPressed: _handleSignIn,
-                child: Text("Login with Google"),
-              )
-            : DefaultTabController(
-                length: 2,
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(
-                            'Signed in',
-                            style: Theme.of(context).textTheme.titleMedium,
-                          ),
-                          OutlinedButton(
-                            onPressed: _handleSignOut,
-                            child: const Text('Sign out'),
-                          ),
-                        ],
-                      ),
+      backgroundColor: const Color(0xFF1C1C1E),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF1C1C1E),
+        toolbarHeight: 72,
+        title: SizedBox(
+          height: 52,
+          child: Image.asset(
+            'assets/images/LikePartite_1.png',
+            fit: BoxFit.contain,
+            filterQuality: FilterQuality.high,
+          ),
+        ),
+        centerTitle: true,
+        actions: _currentUser != null
+            ? [
+                Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: OutlinedButton(
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white70,
+                      side: const BorderSide(color: Colors.white24),
                     ),
-                    TabBar(
-                      tabs: [
-                        Tab(text: 'Liked (${_likedNodes.length})'),
-                        Tab(text: 'Recommended (${_rankedNeighbors.length})'),
-                      ],
-                    ),
-                    Expanded(
-                      child: TabBarView(
-                        children: [
-                          _buildVideoList(
-                            _likedNodes,
-                            'No liked videos loaded yet.',
-                          ),
-                          _buildVideoList(
-                            _rankedNeighbors,
-                            'No recommendations yet. Sign in again to refresh.',
-                            showScore: true,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
+                    onPressed: _handleSignOut,
+                    child: const Text('Sign out'),
+                  ),
                 ),
-              ),
+              ]
+            : null,
       ),
+      body: _showResults ? _buildResultsView(context) : _buildLandingPage(),
     );
   }
 }
