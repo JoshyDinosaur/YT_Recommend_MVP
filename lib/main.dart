@@ -356,6 +356,8 @@ class _YTMvpState extends State<YTMvp> {
     for (final node in likedNodes) {
       final cat = node.categoryId;
       if (cat == null || cat.isEmpty) continue;
+      if (_tooSimilarToPicked(node, picked)) continue;
+
       if (seenCategories.add(cat)) {
         picked.add(node);
         if (picked.length >= maxSeeds) return picked;
@@ -364,11 +366,27 @@ class _YTMvpState extends State<YTMvp> {
 
     for (final node in likedNodes) {
       if (picked.any((p) => p.id == node.id)) continue;
+      if (_tooSimilarToPicked(node, picked)) continue;
+
       picked.add(node);
       if (picked.length >= maxSeeds) break;
     }
 
     return picked;
+  }
+
+  bool _tooSimilarToPicked(VideoNode candidate, List<VideoNode> picked) {
+    final candidateColorGroup = _cardColorForCategory(candidate.categoryId);
+
+    return picked.any((seed) {
+      final sameColorGroup =
+          _cardColorForCategory(seed.categoryId) == candidateColorGroup;
+
+      final tagOverlap = _tagWordOverlap(candidate, seed) >= 2;
+
+      // only check for tag overlap for now. Category color group overlap check is off
+      return (tagOverlap);
+    });
   }
 
   Future<List<VideoNode>> _attachCategories(
@@ -544,6 +562,8 @@ class _YTMvpState extends State<YTMvp> {
         final v = nodes[i];
         final thumb = v.thumbnailUrl;
         final cardColor = _cardColorForCategory(v.categoryId);
+        final categoryName =
+            _ytCategoryNames[v.categoryId] ?? v.categoryId ?? 'Unknown';
         return Container(
           margin: const EdgeInsets.only(bottom: 10),
           decoration: BoxDecoration(
@@ -589,6 +609,16 @@ class _YTMvpState extends State<YTMvp> {
                           fontWeight: FontWeight.w500,
                         ),
                       ),
+                      const SizedBox(height: 4),
+                      Text(
+                        categoryName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white54,
+                          fontSize: 11,
+                        ),
+                      ),
                       if (showScore) ...[
                         const SizedBox(height: 4),
                         Text(
@@ -607,6 +637,125 @@ class _YTMvpState extends State<YTMvp> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildGroupedRecommendedList(
+    List<VideoNode> nodes,
+    String emptyMessage,
+  ) {
+    if (nodes.isEmpty) {
+      return Center(
+        child: Text(
+          emptyMessage,
+          style: const TextStyle(color: Colors.white54),
+        ),
+      );
+    }
+
+    final grouped = <String, List<VideoNode>>{};
+
+    for (final node in nodes) {
+      final categoryKey = node.categoryId ?? 'unknown';
+      grouped.putIfAbsent(categoryKey, () => []).add(node);
+    }
+
+    final sections = grouped.entries.toList()
+      ..sort((a, b) => b.value.first.score.compareTo(a.value.first.score));
+
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      children: [
+        for (final section in sections) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 12, bottom: 8),
+            child: Text(
+              _ytCategoryNames[section.key] ?? section.key,
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          ...section.value
+              .take((section.value.length * 0.25).ceil())
+              .map((video) => _buildVideoCard(video, showScore: true)),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildVideoCard(VideoNode v, {bool showScore = false}) {
+    final thumb = v.thumbnailUrl;
+    final cardColor = _cardColorForCategory(v.categoryId);
+    final categoryName =
+        _ytCategoryNames[v.categoryId] ?? v.categoryId ?? 'Unknown';
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      decoration: BoxDecoration(
+        color: cardColor,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white10, width: 0.5),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: const BorderRadius.horizontal(
+              left: Radius.circular(12),
+            ),
+            child: thumb != null
+                ? Image.network(
+                    thumb,
+                    width: 120,
+                    height: 72,
+                    fit: BoxFit.cover,
+                  )
+                : const SizedBox(
+                    width: 120,
+                    height: 72,
+                    child: Icon(Icons.movie, color: Colors.white24),
+                  ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    v.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    categoryName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
+                  if (showScore) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      'score ${v.score}',
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -686,10 +835,9 @@ class _YTMvpState extends State<YTMvp> {
             child: TabBarView(
               children: [
                 _buildVideoList(_likedNodes, 'No liked videos loaded yet.'),
-                _buildVideoList(
+                _buildGroupedRecommendedList(
                   _rankedNeighbors,
                   'No recommendations yet.',
-                  showScore: true,
                 ),
               ],
             ),
